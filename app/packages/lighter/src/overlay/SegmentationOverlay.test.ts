@@ -290,6 +290,35 @@ describe("SegmentationOverlay", () => {
     expect(renderer.drawImage).not.toHaveBeenCalled();
   });
 
+  it("retries after a failed decode instead of giving up for good", async () => {
+    // `decodeMaskPath` returns undefined on failure and caches nothing, so
+    // pinning the path to that result would mean a transient network error
+    // hides the mask for the rest of the clip
+    decodeMaskPath.mockResolvedValueOnce(undefined);
+
+    const overlay = new SegmentationOverlay({
+      id: "segmentation-retry",
+      field: FIELD,
+      label: { _id: "d", _cls: "Segmentation", mask_path: "/m.png" },
+      resolveUrl: () => "/media?filepath=/m.png",
+    });
+
+    render(overlay);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(renderer.drawImage).not.toHaveBeenCalled();
+
+    decodeMaskPath.mockResolvedValue(maskFixture());
+
+    render(overlay);
+    await vi.waitFor(() => expect(overlay.getIsDirty()).toBe(true));
+    render(overlay);
+
+    expect(decodeMaskPath).toHaveBeenCalledTimes(2);
+    expect(renderer.drawImage).toHaveBeenCalled();
+  });
+
   it("says so once when no resolver was supplied", () => {
     const consoleWarn = vi
       .spyOn(console, "warn")

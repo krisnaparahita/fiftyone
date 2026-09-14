@@ -263,6 +263,16 @@ export class SegmentationOverlay extends BaseOverlay<SegmentationLabel> {
           return;
         }
 
+        // Only remember a SUCCESSFUL decode. `decodeMaskPath` returns
+        // undefined on a fetch or decode failure and caches nothing, so
+        // recording the path here would pin the overlay to that one failure
+        // for the life of the clip — a transient network error and the mask
+        // never appears again. Leaving it unrecorded lets the next repaint
+        // try once more.
+        if (!decoded) {
+          return;
+        }
+
         this.#decodedFromPath = decoded;
         this.#decodedPath = path;
         this.markDirty();
