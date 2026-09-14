@@ -414,3 +414,115 @@ describe("VideoFrameLabelsStream mask gate", () => {
     expect(stream.bufferState(timeOfFrame(10, 30))).toBe("missing");
   });
 });
+
+/**
+ * Chunking is counted in frames, but a frame is not a fixed cost: a uint8
+ * segmentation mask is a few KiB while a float32 heatmap at media resolution
+ * is megabytes. These pin the budget that keeps the second from asking for
+ * half a gigabyte through the same code path as the first.
+ */
+describe("VideoFrameLabelsStream byte budget", () => {
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  const internals = (stream: VideoFrameLabelsStream) => stream as any;
+
+  const frameOfBytes = (bytes: number) => ({
+    segmentation: { _cls: "Segmentation", mask: "x".repeat(bytes) },
+  });
+
+  it("uses the configured chunk size before anything has landed", () => {
+    // a light dataset must never pay for this
+    const stream = internals(buildStream());
+
+    expect(stream.effectiveChunkSize()).toBe(stream.chunkSize);
+    expect(stream.maxChunksInFlight()).toBe(4);
+  });
+
+  it("keeps full chunks and concurrency for small frames", () => {
+    const stream = internals(buildStream());
+
+    // ~6 KiB/frame: 60 frames is well under budget
+    stream.observeCost(
+      { 1: frameOfBytes(6 * 1024), 2: frameOfBytes(6 * 1024) },
+      2,
+    );
+
+    expect(stream.effectiveChunkSize()).toBe(stream.chunkSize);
+    expect(stream.maxChunksInFlight()).toBe(4);
+  });
+
+  it("shrinks the chunk once a frame turns out to be expensive", () => {
+    const stream = internals(buildStream());
+
+    // ~2 MiB/frame, the float32 heatmap case
+    stream.observeCost({ 1: frameOfBytes(2 * 1024 * 1024) }, 1);
+
+    expect(stream.effectiveChunkSize()).toBeLessThan(stream.chunkSize);
+    expect(
+      stream.effectiveChunkSize() * stream.bytesPerFrame,
+    ).toBeLessThanOrEqual(24 * 1024 * 1024);
+  });
+
+  it("holds total in-flight payload under the budget", () => {
+    const stream = internals(buildStream());
+
+    stream.observeCost({ 1: frameOfBytes(2 * 1024 * 1024) }, 1);
+
+    const inFlight =
+      stream.maxChunksInFlight() *
+      stream.effectiveChunkSize() *
+      stream.bytesPerFrame;
+
+    expect(inFlight).toBeLessThanOrEqual(24 * 1024 * 1024);
+  });
+
+  it("never shrinks below a floor that could still keep up", () => {
+    const stream = internals(buildStream());
+
+    // absurdly large: one frame alone exceeds the whole budget
+    stream.observeCost({ 1: frameOfBytes(64 * 1024 * 1024) }, 1);
+
+    expect(stream.effectiveChunkSize()).toBe(4);
+    // still fetched, just never alongside anything else
+    expect(stream.maxChunksInFlight()).toBe(1);
+  });
+
+  it("re-widens when the expensive field is deactivated", () => {
+    const stream = internals(buildStream());
+
+    stream.observeCost({ 1: frameOfBytes(2 * 1024 * 1024) }, 1);
+    expect(stream.effectiveChunkSize()).toBeLessThan(stream.chunkSize);
+
+    // the latest observation wins outright: averaging would smear the
+    // transition across several more wrongly-sized requests
+    stream.observeCost({ 1: frameOfBytes(1024) }, 1);
+    expect(stream.effectiveChunkSize()).toBe(stream.chunkSize);
+  });
+
+  it("averages across the frames a window actually landed", () => {
+    const stream = internals(buildStream());
+
+    stream.observeCost({ 1: frameOfBytes(1000), 2: frameOfBytes(3000) }, 2);
+
+    expect(stream.bytesPerFrame).toBeGreaterThan(1900);
+    expect(stream.bytesPerFrame).toBeLessThan(2100);
+  });
+
+  it("does not measure a window that landed nothing", () => {
+    const stream = internals(buildStream());
+
+    stream.observeCost({}, 0);
+
+    expect(stream.bytesPerFrame).toBeUndefined();
+    expect(stream.effectiveChunkSize()).toBe(stream.chunkSize);
+  });
+
+  it("counts a label-less frame as costing something", () => {
+    // otherwise an empty window would read as free and re-inflate the chunk
+    const stream = internals(buildStream());
+
+    stream.observeCost({ 1: {}, 2: {} }, 2);
+
+    expect(stream.bytesPerFrame).toBeGreaterThanOrEqual(1);
+  });
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+});

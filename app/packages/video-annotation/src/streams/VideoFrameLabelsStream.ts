@@ -113,6 +113,68 @@ const MASK_GATE_ENABLED = readMaskGateEnabled();
  */
 const MAX_CHUNKS_IN_FLIGHT = 4;
 
+/**
+ * Bytes of label payload this stream will keep in flight at once.
+ *
+ * Chunking is counted in FRAMES, but a frame is not a fixed cost: a uint8
+ * segmentation mask is a few KiB, while a float32 heatmap at media resolution
+ * is megabytes and barely compresses. At 60 frames a chunk and four chunks in
+ * flight, the same code path asks for ~3 MiB of the first and over half a
+ * gigabyte of the second — which is why heatmap datasets buffer so much worse
+ * than everything else.
+ *
+ * So frames are the unit of the REQUEST and bytes are the unit of the BUDGET:
+ * once the stream has seen what a frame actually costs, it shrinks the chunk
+ * and the concurrency to fit. Datasets whose frames are small never reach this
+ * ceiling and behave exactly as before.
+ */
+const IN_FLIGHT_BYTE_BUDGET = 24 * 1024 * 1024;
+
+/**
+ * Smallest chunk the budget may shrink to. Below this the per-request overhead
+ * and the round-trip dominate, and a stream that fetches one frame at a time
+ * cannot stay ahead of playback however small each fetch is.
+ */
+const MIN_CHUNK_SIZE = 4;
+
+/**
+ * Approximate wire cost of one field's value.
+ *
+ * Masks dominate by orders of magnitude and arrive as base64 strings, so their
+ * length IS the measurement. Everything else is counted coarsely — the goal is
+ * to tell a 6 KiB frame from a 6 MiB one, not to be exact, and walking every
+ * attribute of every label on every window would cost more than it saves.
+ */
+const measureLabelBytes = (value: unknown): number => {
+  if (typeof value === "string") {
+    return value.length;
+  }
+
+  if (Array.isArray(value)) {
+    let total = 0;
+
+    for (const entry of value) {
+      total += measureLabelBytes(entry);
+    }
+
+    return total;
+  }
+
+  if (value && typeof value === "object") {
+    let total = 0;
+
+    for (const nested of Object.values(value as Record<string, unknown>)) {
+      total += measureLabelBytes(nested);
+    }
+
+    return total;
+  }
+
+  // numbers, booleans, null — small and uniform; a nominal cost keeps a
+  // geometry-only frame from measuring as free
+  return 8;
+};
+
 /** Seconds of labels to keep fetched ahead of the playhead. */
 const LABEL_LOOKAHEAD_SECONDS = 12;
 
@@ -141,6 +203,14 @@ export class VideoFrameLabelsStream extends PlaybackStreamBase<FrameLabelSnapsho
   private readonly frameCount: number;
   private readonly frameRate: number;
   private frameField: string;
+  /**
+   * Observed payload cost of one frame, in bytes — `undefined` until the first
+   * window lands. Until then the configured chunk size and concurrency stand,
+   * so a light dataset never pays for this and a heavy one self-corrects after
+   * one request.
+   */
+  private bytesPerFrame?: number;
+
   /** All fields fetched per window + seeded into the engine (primary first). */
   private readonly frameFields: string[];
   private readonly chunkSize: number;
@@ -651,7 +721,7 @@ export class VideoFrameLabelsStream extends PlaybackStreamBase<FrameLabelSnapsho
       void this.fetchChunk(f);
       issued += 1;
 
-      if (issued >= MAX_CHUNKS_IN_FLIGHT) {
+      if (issued >= this.maxChunksInFlight()) {
         return;
       }
 
@@ -753,9 +823,72 @@ export class VideoFrameLabelsStream extends PlaybackStreamBase<FrameLabelSnapsho
     return this.inflight.has(frame);
   }
 
+  /**
+   * Frames to request per chunk, narrowed so one chunk fits the byte budget.
+   *
+   * A budget spent entirely on a single request would leave no concurrency at
+   * all, so a chunk may claim at most half of it — the other half is what lets
+   * a second request overlap the first's round-trip.
+   */
+  private effectiveChunkSize(): number {
+    if (!this.bytesPerFrame) {
+      return this.chunkSize;
+    }
+
+    const affordable = Math.floor(
+      IN_FLIGHT_BYTE_BUDGET / 2 / this.bytesPerFrame,
+    );
+
+    return Math.max(MIN_CHUNK_SIZE, Math.min(this.chunkSize, affordable));
+  }
+
+  /** Chunks to keep in flight, so their combined payload fits the budget. */
+  private maxChunksInFlight(): number {
+    if (!this.bytesPerFrame) {
+      return MAX_CHUNKS_IN_FLIGHT;
+    }
+
+    const perChunk = this.effectiveChunkSize() * this.bytesPerFrame;
+    const affordable = Math.floor(IN_FLIGHT_BYTE_BUDGET / perChunk);
+
+    // Always at least one: a frame costlier than the whole budget still has to
+    // be fetched, just never alongside anything else.
+    return Math.max(1, Math.min(MAX_CHUNKS_IN_FLIGHT, affordable));
+  }
+
+  /**
+   * Record what a landed window actually cost, so the next one is sized for
+   * it. Measured from the payload's own mask strings rather than the response
+   * length, which is already consumed and parsed by the time it gets here.
+   *
+   * The latest observation wins outright. Averaging would smear the one
+   * transition that matters — a heavy field being activated — across several
+   * more oversized requests.
+   */
+  private observeCost(
+    frames: Record<string, Record<string, unknown>>,
+    landed: number,
+  ): void {
+    if (landed <= 0) {
+      return;
+    }
+
+    let bytes = 0;
+
+    for (const fields of Object.values(frames)) {
+      for (const value of Object.values(fields)) {
+        bytes += measureLabelBytes(value);
+      }
+    }
+
+    // A frame carries more than its masks (ids, geometry, attributes), and a
+    // label-less frame would otherwise read as free and re-inflate the chunk.
+    this.bytesPerFrame = Math.max(1, Math.round(bytes / landed));
+  }
+
   private async fetchChunk(startFrame: number): Promise<void> {
     const numFrames = Math.min(
-      this.chunkSize,
+      this.effectiveChunkSize(),
       this.frameCount - startFrame + 1,
     );
 
@@ -806,6 +939,11 @@ export class VideoFrameLabelsStream extends PlaybackStreamBase<FrameLabelSnapsho
         this.releaseMasksAt(Number(frameNumber));
         landed++;
       }
+
+      this.observeCost(
+        result.frames as Record<string, Record<string, unknown>>,
+        landed,
+      );
 
       mergeRange(this.fetchedRanges, result.range);
 
