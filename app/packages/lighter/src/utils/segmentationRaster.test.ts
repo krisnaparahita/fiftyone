@@ -119,6 +119,22 @@ describe("rasterizeSegmentation", () => {
     expect(new Set(Array.from(pixels))).toEqual(new Set([pixels[0]]));
   });
 
+  it("reports a target wider than a byte as itself", () => {
+    // mask targets are not limited to 255 — a model with more classes than
+    // that is ordinary, and narrowing would wrap 300 round to 44, naming the
+    // wrong class in the tooltip and agreeing with itself in the hit test
+    const wide = {
+      channels: 1,
+      arrayType: "Uint16Array",
+      shape: [1, 2],
+      buffer: new Uint16Array([300, 1]).buffer,
+    } as unknown as OverlayMask;
+
+    const { targets } = rasterizeSegmentation(wide, palette({}));
+
+    expect(targets[0]).toBe(300);
+  });
+
   it("rejects a multi-channel mask rather than misreading its channels", () => {
     // an RGB mask's channels are colors, not target indices; painting it
     // through this path would produce confident nonsense

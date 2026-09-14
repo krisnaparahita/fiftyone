@@ -11,6 +11,7 @@ import {
   paletteKey,
   type SegmentationPalette,
 } from "../utils/segmentationPalette";
+import type { RasterizedSegmentation } from "../utils/segmentationRaster";
 import { rasterizeSegmentation } from "../utils/segmentationRaster";
 import { BaseOverlay } from "./BaseOverlay";
 
@@ -45,8 +46,12 @@ export interface SegmentationOverlayOptions {
 export class SegmentationOverlay extends BaseOverlay<SegmentationLabel> {
   /** The rasterized mask, ready to draw. */
   #canvas?: HTMLCanvasElement;
-  /** Per-pixel target indices behind `#canvas`, for hit-testing. */
-  #targets?: Uint8Array;
+  /**
+   * Per-pixel target indices behind `#canvas`, for hit-testing. Typed as the
+   * rasterizer returns it — the source mask's width — so a target above 255
+   * is reported as itself rather than wrapping.
+   */
+  #targets?: RasterizedSegmentation["targets"];
   #maskWidth = 0;
   #maskHeight = 0;
 

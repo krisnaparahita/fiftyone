@@ -16,6 +16,10 @@ import {
   deserialize,
   type OverlayMask,
 } from "@fiftyone/looker/src/numpy";
+
+/** Any of the integer arrays a mask's targets can arrive in. */
+type TypedTargets =
+  Uint8Array | Uint16Array | Uint32Array | Int8Array | Int16Array | Int32Array;
 import { get32BitColor, hexToRgb } from "@fiftyone/utilities";
 
 import {
@@ -31,9 +35,15 @@ export interface RasterizedSegmentation {
   /**
    * The per-pixel target index, for hit-testing and the tooltip. Pixels that
    * did not paint read 0, so this doubles as the "is there anything here"
-   * channel — the same collapse looker does.
+   * channel.
+   *
+   * Typed to match the SOURCE mask rather than always `Uint8Array`: mask
+   * targets are not limited to a byte (a semantic-segmentation model with more
+   * than 255 classes is ordinary), and narrowing here would wrap target 300
+   * around to 44 — a tooltip naming the wrong class, and a hit test agreeing
+   * with it.
    */
-  targets: Uint8Array;
+  targets: TypedTargets;
 }
 
 /** `#rrggbb` -> packed 32-bit RGBA, memoized per rasterize pass. */
@@ -100,7 +110,8 @@ export const rasterizeSegmentation = (
 
   const rgba = new ArrayBuffer(pixels * 4);
   const overlay = new Uint32Array(rgba);
-  const targets = new Uint8Array(pixels);
+  // same width as the source, so a target above 255 is reported as itself
+  const targets = new ArrayType(pixels) as TypedTargets;
   const pack = packer();
 
   // Colors repeat heavily across a mask — a few targets over millions of
