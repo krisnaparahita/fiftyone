@@ -48,6 +48,15 @@ export class HeatmapOverlay extends BaseOverlay<HeatmapLabel> {
 
   #warnedUnsupported = false;
 
+  /**
+   * The (source, palette) that failed to rasterize.
+   *
+   * The reuse check requires a canvas, which a failure leaves unset, so
+   * without this a map that cannot be rasterized is retried — and logged — on
+   * EVERY repaint. During playback that is thirty times a second.
+   */
+  #failedKey?: string;
+
   public cursor = "default";
 
   constructor(options: HeatmapOverlayOptions) {
@@ -105,6 +114,12 @@ export class HeatmapOverlay extends BaseOverlay<HeatmapLabel> {
     }
 
     const key = heatmapPaletteKey(palette);
+    const attempt = `${key}::${typeof source === "string" ? source.length : "decoded"}`;
+
+    // Already known bad, and nothing about the inputs has changed.
+    if (this.#failedKey === attempt) {
+      return undefined;
+    }
 
     if (
       this.#canvas &&
@@ -130,6 +145,7 @@ export class HeatmapOverlay extends BaseOverlay<HeatmapLabel> {
       this.#height = height;
       this.#renderedSource = source;
       this.#renderedPalette = key;
+      this.#failedKey = undefined;
     } catch (error) {
       // one malformed map must not take the whole frame down
       console.error(`[heatmap] failed to rasterize "${this.field}":`, error);
@@ -137,6 +153,7 @@ export class HeatmapOverlay extends BaseOverlay<HeatmapLabel> {
       this.#values = undefined;
       this.#renderedSource = source;
       this.#renderedPalette = key;
+      this.#failedKey = attempt;
     }
 
     return this.#canvas;

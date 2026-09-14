@@ -175,7 +175,14 @@ describe("HeatmapOverlay", () => {
 
     expect(() => render(overlay)).not.toThrow();
     expect(renderer.drawImage).not.toHaveBeenCalled();
-    expect(consoleError).toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledTimes(1);
+
+    // and does not retry on every repaint — that would be thirty console
+    // errors a second through playback for one bad label
+    render(overlay);
+    render(overlay);
+
+    expect(consoleError).toHaveBeenCalledTimes(1);
   });
 
   it("says so once when the map is only on disk", () => {
