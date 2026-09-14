@@ -129,8 +129,7 @@ describe("PixiRenderer2D graphics context lifecycle", () => {
     const graphics = internal.containers
       .get("c1")
       .children.find((c: PIXI.Container) => c instanceof PIXI.Graphics) as
-      | PIXI.Graphics
-      | undefined;
+      PIXI.Graphics | undefined;
     expect(graphics).toBeDefined();
 
     // The GraphicsContext is freed only when destroy is called with context: true.
@@ -316,6 +315,126 @@ describe("PixiRenderer2D slot reuse", () => {
 
     expect(childrenOf(internal, "parent")).toHaveLength(2);
     expect(childrenOf(internal, "child")).toHaveLength(1);
+  });
+
+  it("frees a trimmed slot's GraphicsContext, not just the Graphics", () => {
+    // Pixi 8 frees an owned context only for `options.context === true`;
+    // `{ children: true }` hits neither branch, and it is the context's own
+    // destroy event that evicts its `_gpuContextHash` entry. Without this the
+    // GPU batch data survives every trim — the leak this pooling exists to
+    // avoid. `destroyed` flips either way, so assert on the context.
+    const { renderer, internal } = makeRenderer();
+
+    renderer.beginRebuild("c1");
+    renderer.drawRect(BOUNDS, STYLE, "c1");
+    renderer.drawRect(BOUNDS, STYLE, "c1");
+    renderer.endRebuild("c1");
+
+    const stale = childrenOf(internal, "c1")[1] as PIXI.Graphics;
+    const contextDestroy = vi.spyOn(stale.context, "destroy");
+
+    renderer.beginRebuild("c1");
+    renderer.drawRect(BOUNDS, STYLE, "c1");
+    renderer.endRebuild("c1");
+
+    expect(contextDestroy).toHaveBeenCalled();
+  });
+
+  it("frees the context of a slot replaced by a different type", () => {
+    const { renderer, internal } = makeRenderer();
+
+    renderer.beginRebuild("c1");
+    renderer.drawRect(BOUNDS, STYLE, "c1");
+    renderer.endRebuild("c1");
+
+    const replaced = childrenOf(internal, "c1")[0] as PIXI.Graphics;
+    const contextDestroy = vi.spyOn(replaced.context, "destroy");
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 8;
+    canvas.height = 8;
+
+    renderer.beginRebuild("c1");
+    renderer.drawImage({ type: "canvas", canvas }, BOUNDS, undefined, "c1");
+    renderer.endRebuild("c1");
+
+    expect(contextDestroy).toHaveBeenCalled();
+  });
+
+  it("never leaves a sprite pointing at a destroyed texture", () => {
+    // releasing destroys the texture, so the new one has to be assigned first
+    const { renderer, internal } = makeRenderer();
+    const canvasOf = (seed: number) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 8 + seed;
+      canvas.height = 8;
+      return canvas;
+    };
+
+    renderer.beginRebuild("c1");
+    renderer.drawImage(
+      { type: "canvas", canvas: canvasOf(0) },
+      BOUNDS,
+      undefined,
+      "c1",
+    );
+    renderer.endRebuild("c1");
+
+    const sprite = childrenOf(internal, "c1")[0] as PIXI.Sprite;
+
+    renderer.beginRebuild("c1");
+    renderer.drawImage(
+      { type: "canvas", canvas: canvasOf(1) },
+      BOUNDS,
+      undefined,
+      "c1",
+    );
+    renderer.endRebuild("c1");
+
+    expect(sprite.texture.destroyed).toBe(false);
+  });
+
+  it("resets tint when reusing a sprite", () => {
+    // drawImage sets tint only when asked, so a reused sprite would keep the
+    // previous mask's color
+    const { renderer, internal } = makeRenderer();
+    const canvas = document.createElement("canvas");
+    canvas.width = 8;
+    canvas.height = 8;
+
+    renderer.beginRebuild("c1");
+    renderer.drawImage(
+      { type: "canvas", canvas },
+      BOUNDS,
+      { tint: "#ff0000" },
+      "c1",
+    );
+    renderer.endRebuild("c1");
+
+    renderer.beginRebuild("c1");
+    renderer.drawImage({ type: "canvas", canvas }, BOUNDS, undefined, "c1");
+    renderer.endRebuild("c1");
+
+    const sprite = childrenOf(internal, "c1")[0] as PIXI.Sprite;
+    expect(sprite.tint).toBe(0xffffff);
+  });
+
+  it("reports no bounds for a container a pass left empty", () => {
+    // Pixi reports an empty container's bounds as infinite, which
+    // `getMouseDistance` turns into NaN. Before pooling the container would
+    // have been disposed and `getBounds` returned undefined.
+    const { renderer } = makeRenderer();
+
+    renderer.beginRebuild("c1");
+    renderer.drawRect(BOUNDS, STYLE, "c1");
+    renderer.endRebuild("c1");
+
+    expect(renderer.getBounds("c1")).toBeDefined();
+
+    renderer.beginRebuild("c1");
+    renderer.endRebuild("c1");
+
+    expect(renderer.getBounds("c1")).toBeUndefined();
   });
 
   it("appends when no rebuild pass is open, as it did before pooling", () => {
