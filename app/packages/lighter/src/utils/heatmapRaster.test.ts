@@ -199,6 +199,27 @@ describe("rasterizeHeatmap — shared rules", () => {
     expect(Array.from(values)).toEqual([0, 0.5, 0.25, 1]);
   });
 
+  it("survives a degenerate range instead of painting nothing", () => {
+    // `clampedIndex` divides by `stop - start`; a single-value range would
+    // make every index NaN. There is no gradient to express, so the opacity
+    // ramp still shows where the data is.
+    const { rgba } = rasterizeHeatmap(
+      map([5, 5, 5, 5], 2),
+      palette([5, 5], { colorBy: "value" }),
+    );
+
+    expect(new Uint32Array(rgba)[0]).not.toBe(0);
+  });
+
+  it("survives an inverted range", () => {
+    const { rgba } = rasterizeHeatmap(
+      map([5, 5, 5, 5], 2),
+      palette([10, 0], { colorBy: "value" }),
+    );
+
+    expect(Number.isFinite(new Uint32Array(rgba)[0])).toBe(true);
+  });
+
   it("rejects a multi-channel map rather than guessing at its channels", () => {
     expect(() =>
       rasterizeHeatmap(

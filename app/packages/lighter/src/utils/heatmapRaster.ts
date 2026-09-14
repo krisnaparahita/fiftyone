@@ -81,7 +81,15 @@ export const rasterizeHeatmap = (
   const overlay = new Uint32Array(rgba);
   const values = new Float32Array(pixels);
 
-  const byValue = palette.mode === COLOR_BY.VALUE && palette.scale.length > 0;
+  // `clampedIndex` divides by `stop - start`, so a degenerate range (a
+  // constant map, or a `range` the user set to a single value) would make
+  // every index NaN and paint nothing. There is no gradient to express in that
+  // case, so fall back to the opacity ramp, which still shows where the data
+  // is.
+  const hasSpan = stop > start;
+
+  const byValue =
+    palette.mode === COLOR_BY.VALUE && palette.scale.length > 0 && hasSpan;
 
   for (let i = 0; i < pixels; i++) {
     const value = source[i];
