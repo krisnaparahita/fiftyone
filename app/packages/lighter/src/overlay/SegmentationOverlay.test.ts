@@ -190,7 +190,15 @@ describe("SegmentationOverlay", () => {
 
     expect(() => render(overlay)).not.toThrow();
     expect(renderer.drawImage).not.toHaveBeenCalled();
-    expect(consoleError).toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledTimes(1);
+
+    // and does not retry it on every repaint: the reuse check needs a canvas,
+    // which a failure leaves unset, so without a failure memo this would log
+    // thirty times a second through playback
+    render(overlay);
+    render(overlay);
+
+    expect(consoleError).toHaveBeenCalledTimes(1);
   });
 
   it("says so once when the mask is only on disk", () => {

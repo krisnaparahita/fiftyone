@@ -62,6 +62,15 @@ export class SegmentationOverlay extends BaseOverlay<SegmentationLabel> {
   /** Logged at most once per overlay — a per-frame warning would flood. */
   #warnedUnsupported = false;
 
+  /**
+   * The (source, palette) that failed to rasterize.
+   *
+   * The reuse check requires a canvas, which a failure leaves unset, so
+   * without this a mask that cannot be rasterized is retried — and logged —
+   * on EVERY repaint. During playback that is thirty times a second.
+   */
+  #failedKey?: string;
+
   public cursor = "default";
 
   constructor(options: SegmentationOverlayOptions) {
@@ -130,6 +139,12 @@ export class SegmentationOverlay extends BaseOverlay<SegmentationLabel> {
     }
 
     const key = paletteKey(palette);
+    const attempt = `${key}::${typeof source === "string" ? source.length : "decoded"}`;
+
+    // Already known bad, and nothing about the inputs has changed.
+    if (this.#failedKey === attempt) {
+      return undefined;
+    }
 
     if (
       this.#canvas &&
@@ -158,6 +173,7 @@ export class SegmentationOverlay extends BaseOverlay<SegmentationLabel> {
       this.#maskHeight = height;
       this.#renderedSource = source;
       this.#renderedPalette = key;
+      this.#failedKey = undefined;
     } catch (error) {
       // A malformed or multi-channel mask must not take the frame down with
       // it — every other overlay in this pass still has to paint.
@@ -169,6 +185,7 @@ export class SegmentationOverlay extends BaseOverlay<SegmentationLabel> {
       this.#targets = undefined;
       this.#renderedSource = source;
       this.#renderedPalette = key;
+      this.#failedKey = attempt;
     }
 
     return this.#canvas;
