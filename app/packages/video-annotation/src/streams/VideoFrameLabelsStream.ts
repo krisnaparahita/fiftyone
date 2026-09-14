@@ -318,15 +318,17 @@ export class VideoFrameLabelsStream extends PlaybackStreamBase<FrameLabelSnapsho
         continue;
       }
 
+      const claimed = Math.max(1, this.chunkLengthAt(f));
+
       const inflight = this.inflight.get(f);
       if (inflight) {
         promises.push(inflight);
-        f += this.chunkSize;
+        f += claimed;
         continue;
       }
 
       promises.push(this.fetchChunk(f));
-      f += this.chunkSize;
+      f += claimed;
     }
 
     await Promise.all(promises);
@@ -718,6 +720,11 @@ export class VideoFrameLabelsStream extends PlaybackStreamBase<FrameLabelSnapsho
         continue;
       }
 
+      // Read the length BEFORE dispatching: the fetch can land and change the
+      // cost estimate, and planning has to advance by what this chunk
+      // actually claimed.
+      const claimed = this.chunkLengthAt(f);
+
       void this.fetchChunk(f);
       issued += 1;
 
@@ -725,10 +732,12 @@ export class VideoFrameLabelsStream extends PlaybackStreamBase<FrameLabelSnapsho
         return;
       }
 
-      // `fetchChunk` covers `chunkSize` frames from `f`, so the next missing
-      // frame cannot be nearer than that — skip ahead instead of re-testing
-      // every frame it just claimed.
-      f += this.chunkSize - 1;
+      // Skip the frames this chunk just claimed rather than re-testing each.
+      // Advancing by the CONFIGURED size instead would stride past frames the
+      // chunk never covered once the byte budget shrank it — a request for
+      // 1-6 followed by one for 61, leaving 7-60 unfetched and playback
+      // stalling on them.
+      f += Math.max(1, claimed) - 1;
     }
   }
 
@@ -867,9 +876,10 @@ export class VideoFrameLabelsStream extends PlaybackStreamBase<FrameLabelSnapsho
    */
   private observeCost(
     frames: Record<string, Record<string, unknown>>,
-    landed: number,
+    covered: number,
   ): void {
-    if (landed <= 0) {
+    // an empty or inverted range measures nothing; leave the estimate alone
+    if (!Number.isFinite(covered) || covered <= 0) {
       return;
     }
 
@@ -883,14 +893,19 @@ export class VideoFrameLabelsStream extends PlaybackStreamBase<FrameLabelSnapsho
 
     // A frame carries more than its masks (ids, geometry, attributes), and a
     // label-less frame would otherwise read as free and re-inflate the chunk.
-    this.bytesPerFrame = Math.max(1, Math.round(bytes / landed));
+    this.bytesPerFrame = Math.max(1, Math.round(bytes / covered));
+  }
+
+  /** Frames one chunk starting here would claim; 0 past the end of the clip. */
+  private chunkLengthAt(startFrame: number): number {
+    return Math.max(
+      0,
+      Math.min(this.effectiveChunkSize(), this.frameCount - startFrame + 1),
+    );
   }
 
   private async fetchChunk(startFrame: number): Promise<void> {
-    const numFrames = Math.min(
-      this.effectiveChunkSize(),
-      this.frameCount - startFrame + 1,
-    );
+    const numFrames = this.chunkLengthAt(startFrame);
 
     if (numFrames <= 0) {
       return;
@@ -940,9 +955,16 @@ export class VideoFrameLabelsStream extends PlaybackStreamBase<FrameLabelSnapsho
         landed++;
       }
 
+      // Measure against the range the server ANSWERED for, not the number of
+      // documents it returned: a window over frames with no labels comes back
+      // empty, and treating that as "measured nothing" would keep a stale
+      // expensive estimate — and with it a needlessly small chunk — forever.
+      const [rangeStart, rangeEnd] = result.range;
+      const covered = rangeEnd - rangeStart + 1;
+
       this.observeCost(
         result.frames as Record<string, Record<string, unknown>>,
-        landed,
+        covered,
       );
 
       mergeRange(this.fetchedRanges, result.range);

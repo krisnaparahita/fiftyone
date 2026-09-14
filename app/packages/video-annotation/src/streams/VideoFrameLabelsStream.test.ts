@@ -507,6 +507,53 @@ describe("VideoFrameLabelsStream byte budget", () => {
     expect(stream.bytesPerFrame).toBeLessThan(2100);
   });
 
+  it("plans the next chunk from what the last one claimed", () => {
+    // Striding by the CONFIGURED size once the budget has shrunk the chunk
+    // leaves a hole: a request for frames 1-6 followed by one for 61, with
+    // 7-60 never fetched and playback stalling on them.
+    const stream = internals(buildStream());
+
+    stream.observeCost({ 1: frameOfBytes(2 * 1024 * 1024) }, 1);
+
+    const claimed = stream.chunkLengthAt(1);
+
+    expect(claimed).toBe(stream.effectiveChunkSize());
+    expect(claimed).toBeLessThan(stream.chunkSize);
+  });
+
+  it("claims only the frames that remain at the end of the clip", () => {
+    const stream = internals(buildStream());
+
+    // frameCount is 100 in the fixture
+    expect(stream.chunkLengthAt(98)).toBe(3);
+    expect(stream.chunkLengthAt(101)).toBe(0);
+  });
+
+  it("measures against the range answered for, not the documents returned", () => {
+    // a window over frames with no labels comes back empty; treating that as
+    // "measured nothing" would keep a stale expensive estimate forever
+    const stream = internals(buildStream());
+
+    stream.observeCost({ 1: frameOfBytes(2 * 1024 * 1024) }, 1);
+    const expensive = stream.bytesPerFrame;
+
+    stream.observeCost({}, 60);
+
+    expect(stream.bytesPerFrame).toBeLessThan(expensive);
+    expect(stream.effectiveChunkSize()).toBe(stream.chunkSize);
+  });
+
+  it("ignores an inverted range", () => {
+    const stream = internals(buildStream());
+
+    stream.observeCost({ 1: frameOfBytes(1024) }, 1);
+    const before = stream.bytesPerFrame;
+
+    stream.observeCost({ 1: frameOfBytes(1024) }, -5);
+
+    expect(stream.bytesPerFrame).toBe(before);
+  });
+
   it("does not measure a window that landed nothing", () => {
     const stream = internals(buildStream());
 
